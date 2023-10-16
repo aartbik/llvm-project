@@ -1770,7 +1770,7 @@ struct RemoveOutsDependency : public OpRewritePattern<GenericOp> {
         if (!operandType)
           continue;
 
-        // If outs is sparse, leave it to the sparse compiler.
+        // If outs is sparse, leave it to the sparsifier.
         if (sparse_tensor::getSparseTensorEncoding(operandVal.getType()))
           continue;
 

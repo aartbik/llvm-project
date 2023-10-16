@@ -393,8 +393,8 @@ public:
 };
 
 /// Rewrites a sequence of operations for sparse tensor selections in to
-/// semi-ring operations such that they can be compiled correctly by the sparse
-/// compiler. E.g., transforming the following sequence
+/// semi-ring operations such that they can be compiled correctly by the
+/// sparsifier. E.g., transforming the following sequence
 ///
 /// %sel = arith.select %cond, %sp1, %sp2
 ///
@@ -1053,7 +1053,7 @@ private:
     const RankedTensorType bufferTp =
         getBufferType(dstTp, !dstTp.isIdentity() && !fromSparseConst);
     // Only imposes foreach order on dense constant (which will be statically
-    // sorted by the sparse compiler), otherwise the rotated loop sequence
+    // sorted by the sparsifier), otherwise the rotated loop sequence
     // results to bad cache locality.
     const AffineMapAttr foreachOrder =
         (!dstTp.isIdentity() && fromSparseConst)
