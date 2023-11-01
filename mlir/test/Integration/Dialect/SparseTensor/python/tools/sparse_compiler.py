@@ -2,7 +2,7 @@
 #  See https://llvm.org/LICENSE.txt for license information.
 #  SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
-#  This file contains the sparse compiler class.
+#  This file contains the SparseCompiler class.
 
 from mlir import execution_engine
 from mlir import ir
