@@ -15,6 +15,7 @@ class SOP_Pseudo<string opName, dag outs, dag ins, string asmOps,
 
   let isPseudo = 1;
   let isCodeGenOnly = 1;
+  let Size = 4;
 
   string Mnemonic = opName;
   string AsmOperands = asmOps;
@@ -36,7 +37,6 @@ class SOP1_Pseudo <string opName, dag outs, dag ins,
   let SALU = 1;
   let SOP1 = 1;
   let SchedRW = [WriteSALU];
-  let Size = 4;
   let UseNamedOperandTable = 1;
 
   bits<1> has_src0 = 1;
@@ -362,7 +362,8 @@ let SubtargetPredicate = isGFX9Plus in {
   } // End hasSideEffects = 1, Defs = [EXEC, SCC], Uses = [EXEC]
 
   let isReMaterializable = 1 in
-  def S_BITREPLICATE_B64_B32 : SOP1_64_32<"s_bitreplicate_b64_b32">;
+  def S_BITREPLICATE_B64_B32 : SOP1_64_32<"s_bitreplicate_b64_b32",
+  [(set i64:$sdst, (int_amdgcn_s_bitreplicate i32:$src0))]>;
 } // End SubtargetPredicate = isGFX9Plus
 
 let SubtargetPredicate = isGFX10Plus in {
@@ -455,7 +456,6 @@ class SOP2_Pseudo<string opName, dag outs, dag ins,
   // let sdst = xxx in {
   // for multiclasses that include both real and pseudo instructions.
   // field bits<7> sdst = 0;
-  // let Size = 4; // Do we need size here?
 }
 
 class SOP2_Real<SOP_Pseudo ps, string real_name = ps.Mnemonic> :
@@ -1558,6 +1558,11 @@ let SubtargetPredicate = isGFX11Plus in {
                                 "$simm16">;
 } // End SubtargetPredicate = isGFX11Plus
 
+let SubtargetPredicate = HasVGPRSingleUseHintInsts in {
+  def S_SINGLEUSE_VDST :
+    SOPP_Pseudo<"s_singleuse_vdst", (ins s16imm:$simm16), "$simm16">;
+} // End SubtargetPredicate = HasVGPRSingeUseHintInsts
+
 //===----------------------------------------------------------------------===//
 // SOP1 Patterns
 //===----------------------------------------------------------------------===//
@@ -2266,6 +2271,12 @@ defm S_TTRACEDATA                 : SOPP_Real_32_gfx11<0x03a>;
 defm S_TTRACEDATA_IMM             : SOPP_Real_32_gfx11<0x03b>;
 defm S_ICACHE_INV                 : SOPP_Real_32_gfx11<0x03c>;
 defm S_BARRIER                    : SOPP_Real_32_gfx11<0x03d>;
+
+//===----------------------------------------------------------------------===//
+// SOPP - GFX1150
+//===----------------------------------------------------------------------===//
+
+defm S_SINGLEUSE_VDST             : SOPP_Real_32_gfx11<0x013>;
 
 //===----------------------------------------------------------------------===//
 // SOPP - GFX6, GFX7, GFX8, GFX9, GFX10

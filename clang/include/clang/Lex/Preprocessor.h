@@ -1483,13 +1483,13 @@ public:
 
   /// Mark the file as included.
   /// Returns true if this is the first time the file was included.
-  bool markIncluded(const FileEntry *File) {
+  bool markIncluded(FileEntryRef File) {
     HeaderInfo.getFileInfo(File);
     return IncludedFiles.insert(File).second;
   }
 
   /// Return true if this header has already been included.
-  bool alreadyIncluded(const FileEntry *File) const {
+  bool alreadyIncluded(FileEntryRef File) const {
     HeaderInfo.getFileInfo(File);
     return IncludedFiles.count(File);
   }
@@ -1722,6 +1722,9 @@ public:
   /// Lex the next token for this preprocessor.
   void Lex(Token &Result);
 
+  /// Lex all tokens for this preprocessor until (and excluding) end of file.
+  void LexTokensUntilEOF(std::vector<Token> *Tokens = nullptr);
+
   /// Lex a token, forming a header-name token if possible.
   bool LexHeaderName(Token &Result, bool AllowMacroExpansion = true);
 
@@ -1935,8 +1938,8 @@ public:
   /// (1-based).
   ///
   /// \returns true if an error occurred, false otherwise.
-  bool SetCodeCompletionPoint(const FileEntry *File,
-                              unsigned Line, unsigned Column);
+  bool SetCodeCompletionPoint(FileEntryRef File, unsigned Line,
+                              unsigned Column);
 
   /// Determine if we are performing code completion.
   bool isCodeCompletionEnabled() const { return CodeCompletionFile != nullptr; }
@@ -2697,7 +2700,7 @@ public:
   ///         \c false if the module appears to be usable.
   static bool checkModuleIsAvailable(const LangOptions &LangOpts,
                                      const TargetInfo &TargetInfo,
-                                     DiagnosticsEngine &Diags, Module *M);
+                                     const Module &M, DiagnosticsEngine &Diags);
 
   // Module inclusion testing.
   /// Find the module that owns the source or header file that
@@ -2876,9 +2879,9 @@ public:
   /// Alter the state of whether this PP currently is in a
   /// "-Wunsafe-buffer-usage" opt-out region.
   ///
-  /// \param isEnter: true if this PP is entering a region; otherwise, this PP
+  /// \param isEnter true if this PP is entering a region; otherwise, this PP
   /// is exiting a region
-  /// \param Loc: the location of the entry or exit of a
+  /// \param Loc the location of the entry or exit of a
   /// region
   /// \return true iff it is INVALID to enter or exit a region, i.e.,
   /// attempt to enter a region before exiting a previous region, or exiting a
@@ -2890,7 +2893,7 @@ public:
   ///          opt-out region
   bool isPPInSafeBufferOptOutRegion();
 
-  /// \param StartLoc: output argument. It will be set to the start location of
+  /// \param StartLoc output argument. It will be set to the start location of
   /// the current "-Wunsafe-buffer-usage" opt-out region iff this function
   /// returns true.
   /// \return true iff this PP is currently in a "-Wunsafe-buffer-usage"

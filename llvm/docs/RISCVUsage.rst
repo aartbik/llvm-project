@@ -106,16 +106,17 @@ on support follow.
      ``Zcb``          Supported
      ``Zcd``          Supported
      ``Zcf``          Supported
-     ``Zcmp``         Assembly Support
+     ``Zcmp``         Supported
      ``Zcmt``         Assembly Support
      ``Zdinx``        Supported
+     ``Zfa``          Supported
      ``Zfh``          Supported
      ``Zfhmin``       Supported
      ``Zfinx``        Supported
      ``Zhinx``        Supported
      ``Zhinxmin``     Supported
      ``Zicbom``       Assembly Support
-     ``Zicbop``       Assembly Support
+     ``Zicbop``       Supported
      ``Zicboz``       Assembly Support
      ``Zicntr``       (`See Note <#riscv-i2p1-note>`__)
      ``Zicsr``        (`See Note <#riscv-i2p1-note>`__)
@@ -195,9 +196,6 @@ The primary goal of experimental support is to assist in the process of ratifica
 
 ``experimental-zacas``
   LLVM implements the `1.0-rc1 draft specification <https://github.com/riscv/riscv-zacas/releases/tag/v1.0-rc1>`_.
-
-``experimental-zfa``
-  LLVM implements the `0.2 draft specification <https://github.com/riscv/riscv-isa-manual/releases/download/draft-20230131-c0b298a/zfa-20230414.pdf>`__.
 
 ``experimental-zfbfmin``, ``experimental-zvfbfmin``, ``experimental-zvfbfwma``
   LLVM implements assembler support for the `0.8.0 draft specification <https://github.com/riscv/riscv-bfloat16/releases/tag/20230629>`_.

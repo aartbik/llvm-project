@@ -383,7 +383,7 @@ Constant *llvm::ConstantFoldLoadThroughBitcast(Constant *C, Type *DestTy,
         Cast = Instruction::PtrToInt;
 
       if (CastInst::castIsValid(Cast, C, DestTy))
-        return ConstantExpr::getCast(Cast, C, DestTy);
+        return ConstantFoldCastOperand(Cast, C, DestTy, DL);
     }
 
     // If this isn't an aggregate type, there is nothing we can do to drill down
@@ -588,7 +588,7 @@ Constant *FoldReinterpretLoadFromConst(Constant *C, Type *LoadTy,
         if (DL.isNonIntegralPointerType(LoadTy->getScalarType()))
           // Be careful not to replace a load of an addrspace value with an inttoptr here
           return nullptr;
-        Res = ConstantExpr::getCast(Instruction::IntToPtr, Res, LoadTy);
+        Res = ConstantExpr::getIntToPtr(Res, LoadTy);
       }
       return Res;
     }
@@ -846,14 +846,14 @@ Constant *CastGEPIndices(Type *SrcElemTy, ArrayRef<Constant *> Ops,
              SrcElemTy, Ops.slice(1, i - 1)))) &&
         Ops[i]->getType()->getScalarType() != IntIdxScalarTy) {
       Any = true;
-      Type *NewType = Ops[i]->getType()->isVectorTy()
-                          ? IntIdxTy
-                          : IntIdxScalarTy;
-      NewIdxs.push_back(ConstantExpr::getCast(CastInst::getCastOpcode(Ops[i],
-                                                                      true,
-                                                                      NewType,
-                                                                      true),
-                                              Ops[i], NewType));
+      Type *NewType =
+          Ops[i]->getType()->isVectorTy() ? IntIdxTy : IntIdxScalarTy;
+      Constant *NewIdx = ConstantFoldCastOperand(
+          CastInst::getCastOpcode(Ops[i], true, NewType, true), Ops[i], NewType,
+          DL);
+      if (!NewIdx)
+        return nullptr;
+      NewIdxs.push_back(NewIdx);
     } else
       NewIdxs.push_back(Ops[i]);
   }
@@ -1217,10 +1217,11 @@ Constant *llvm::ConstantFoldCompareInstOperands(
         Type *IntPtrTy = DL.getIntPtrType(CE0->getType());
         // Convert the integer value to the right size to ensure we get the
         // proper extension or truncation.
-        Constant *C = ConstantExpr::getIntegerCast(CE0->getOperand(0),
-                                                   IntPtrTy, false);
-        Constant *Null = Constant::getNullValue(C->getType());
-        return ConstantFoldCompareInstOperands(Predicate, C, Null, DL, TLI);
+        if (Constant *C = ConstantFoldIntegerCast(CE0->getOperand(0), IntPtrTy,
+                                                  /*IsSigned*/ false, DL)) {
+          Constant *Null = Constant::getNullValue(C->getType());
+          return ConstantFoldCompareInstOperands(Predicate, C, Null, DL, TLI);
+        }
       }
 
       // Only do this transformation if the int is intptrty in size, otherwise
@@ -1242,11 +1243,12 @@ Constant *llvm::ConstantFoldCompareInstOperands(
 
           // Convert the integer value to the right size to ensure we get the
           // proper extension or truncation.
-          Constant *C0 = ConstantExpr::getIntegerCast(CE0->getOperand(0),
-                                                      IntPtrTy, false);
-          Constant *C1 = ConstantExpr::getIntegerCast(CE1->getOperand(0),
-                                                      IntPtrTy, false);
-          return ConstantFoldCompareInstOperands(Predicate, C0, C1, DL, TLI);
+          Constant *C0 = ConstantFoldIntegerCast(CE0->getOperand(0), IntPtrTy,
+                                                 /*IsSigned*/ false, DL);
+          Constant *C1 = ConstantFoldIntegerCast(CE1->getOperand(0), IntPtrTy,
+                                                 /*IsSigned*/ false, DL);
+          if (C0 && C1)
+            return ConstantFoldCompareInstOperands(Predicate, C0, C1, DL, TLI);
         }
 
         // Only do this transformation if the int is intptrty in size, otherwise
@@ -1401,9 +1403,9 @@ Constant *llvm::ConstantFoldCastOperand(unsigned Opcode, Constant *C,
       // the width of a pointer, so it can't be done in ConstantExpr::getCast.
       if (CE->getOpcode() == Instruction::IntToPtr) {
         // zext/trunc the inttoptr to pointer size.
-        FoldedValue = ConstantExpr::getIntegerCast(
-            CE->getOperand(0), DL.getIntPtrType(CE->getType()),
-            /*IsSigned=*/false);
+        FoldedValue = ConstantFoldIntegerCast(CE->getOperand(0),
+                                              DL.getIntPtrType(CE->getType()),
+                                              /*IsSigned=*/false, DL);
       } else if (auto *GEP = dyn_cast<GEPOperator>(CE)) {
         // If we have GEP, we can perform the following folds:
         // (ptrtoint (gep null, x)) -> x
@@ -1431,11 +1433,11 @@ Constant *llvm::ConstantFoldCastOperand(unsigned Opcode, Constant *C,
       }
       if (FoldedValue) {
         // Do a zext or trunc to get to the ptrtoint dest size.
-        return ConstantExpr::getIntegerCast(FoldedValue, DestTy,
-                                            /*IsSigned=*/false);
+        return ConstantFoldIntegerCast(FoldedValue, DestTy, /*IsSigned=*/false,
+                                       DL);
       }
     }
-    return ConstantExpr::getCast(Opcode, C, DestTy);
+    break;
   case Instruction::IntToPtr:
     // If the input is a ptrtoint, turn the pair into a ptr to ptr bitcast if
     // the int size is >= the ptr size and the address spaces are the same.
@@ -1454,8 +1456,7 @@ Constant *llvm::ConstantFoldCastOperand(unsigned Opcode, Constant *C,
         }
       }
     }
-
-    return ConstantExpr::getCast(Opcode, C, DestTy);
+    break;
   case Instruction::Trunc:
   case Instruction::ZExt:
   case Instruction::SExt:
@@ -1466,10 +1467,26 @@ Constant *llvm::ConstantFoldCastOperand(unsigned Opcode, Constant *C,
   case Instruction::FPToUI:
   case Instruction::FPToSI:
   case Instruction::AddrSpaceCast:
-      return ConstantExpr::getCast(Opcode, C, DestTy);
+    break;
   case Instruction::BitCast:
     return FoldBitCast(C, DestTy, DL);
   }
+
+  if (ConstantExpr::isDesirableCastOp(Opcode))
+    return ConstantExpr::getCast(Opcode, C, DestTy);
+  return ConstantFoldCastInstruction(Opcode, C, DestTy);
+}
+
+Constant *llvm::ConstantFoldIntegerCast(Constant *C, Type *DestTy,
+                                        bool IsSigned, const DataLayout &DL) {
+  Type *SrcTy = C->getType();
+  if (SrcTy == DestTy)
+    return C;
+  if (SrcTy->getScalarSizeInBits() > DestTy->getScalarSizeInBits())
+    return ConstantFoldCastOperand(Instruction::Trunc, C, DestTy, DL);
+  if (IsSigned)
+    return ConstantFoldCastOperand(Instruction::SExt, C, DestTy, DL);
+  return ConstantFoldCastOperand(Instruction::ZExt, C, DestTy, DL);
 }
 
 //===----------------------------------------------------------------------===//

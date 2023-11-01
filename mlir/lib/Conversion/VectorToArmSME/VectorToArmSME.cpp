@@ -26,7 +26,8 @@ static bool isSplatZero(Type elemType, DenseElementsAttr val) {
 }
 
 /// Generates a for loop over ZA tile slices where the induction variable is
-/// the tile slice index.
+/// the tile slice index. Sets the IR Builder insertion point as the loop body.
+/// Callers of this method are responsible for restoring it if needed.
 static scf::ForOp getLoopOverTileSlices(PatternRewriter &rewriter, Location loc,
                                         Type eltType) {
   auto step = rewriter.create<arith::ConstantIndexOp>(loc, 1);
@@ -66,7 +67,7 @@ namespace {
 ///
 /// is converted to:
 ///
-///   arm_sme.tile_load ... <vertical>
+///   arm_sme.tile_load ... layout<vertical>
 struct TransferReadPermutationToArmSMELowering
     : public OpRewritePattern<vector::TransferReadOp> {
   using OpRewritePattern<vector::TransferReadOp>::OpRewritePattern;
@@ -143,8 +144,8 @@ struct TransferWriteToArmSMELowering
       return failure();
 
     rewriter.replaceOpWithNewOp<arm_sme::TileStoreOp>(
-        writeOp, writeOp.getVector(), writeOp.getSource(),
-        writeOp.getIndices());
+        writeOp, writeOp.getVector(), writeOp.getSource(), writeOp.getIndices(),
+        writeOp.getMask());
     return success();
   }
 };
@@ -226,8 +227,6 @@ struct ConstantOpToArmSMELowering : public OpRewritePattern<arith::ConstantOp> {
     rewriter.create<arm_sme::MoveVectorToTileSliceOp>(
         loc, tileType, constantOp1D, tile, tileSliceIndex);
 
-    rewriter.setInsertionPointAfter(forOp);
-
     rewriter.replaceOp(constantOp, tile);
 
     return success();
@@ -292,8 +291,6 @@ struct BroadcastOpToArmSMELowering
     // tile slice.
     rewriter.create<arm_sme::MoveVectorToTileSliceOp>(
         loc, tileType, broadcastOp1D, tile, tileSliceIndex);
-
-    rewriter.setInsertionPointAfter(forOp);
 
     rewriter.replaceOp(broadcastOp, tile);
 
@@ -371,8 +368,8 @@ struct SplatOpToArmSMELowering : public OpRewritePattern<vector::SplatOp> {
 ///   %alloca = memref.alloca(%svl_s, %svl_s) : memref<?x?xi32>
 ///   %arm_sme.tile_store %src, <hor>, %alloca[%c0, %c0]
 ///     : memref<?x?xi32>, vector<[4]x[4]xi32>
-///   %transposed_src = arm_sme.tile_load %alloca[%c0, %c0], <vertical>
-///     : memref<?x?xi32>, vector<[4]x[4]xi32>
+///   %transposed_src = arm_sme.tile_load %alloca[%c0, %c0]
+///     layout<vertical> : memref<?x?xi32>, vector<[4]x[4]xi32>
 ///
 /// NOTE: Tranposing via memory is obviously expensive, the current intention
 /// is to avoid the transpose if possible, this is therefore intended as a
@@ -430,13 +427,112 @@ struct TransposeOpToArmSMELowering
   }
 };
 
+/// Conversion pattern for vector.outerproduct.
+///
+/// If the vector.outerproduct is masked (and the mask is from a
+/// vector.create_mask), then the mask is decomposed into two 1-D masks for the
+/// operands.
+///
+/// Example:
+///
+///   %mask = vector.create_mask %dimA, %dimB : vector<[4]x[4]xi1>
+///   %result = vector.mask %mask {
+///                vector.outerproduct %vecA, %vecB
+///                 : vector<[4]xf32>, vector<[4]xf32>
+///             } : vector<[4]x[4]xi1> -> vector<[4]x[4]xf32>
+///
+/// is converted to:
+///
+///    %maskA = vector.create_mask %dimA : vector<[4]xi1>
+///    %maskB = vector.create_mask %dimB : vector<[4]xi1>
+///    %result = arm_sme.outerproduct %vecA, %vecB masks(%maskA, %maskB)
+///                : vector<[4]xf32>, vector<[4]xf32>
+///
+/// Unmasked outerproducts can be directly replaced with the arm_sme op.
+///
+/// Example:
+///
+///   %result = vector.outerproduct %vecA, %vecB
+///              : vector<[4]xf32>, vector<[4]xf32>
+///
+/// is converted to:
+///
+///   %result = arm_sme.outerproduct %vecA, %vecB
+///              : vector<[4]xf32>, vector<[4]xf32>
+///
+struct VectorOuterProductToArmSMELowering
+    : public OpRewritePattern<vector::OuterProductOp> {
+
+  using OpRewritePattern<vector::OuterProductOp>::OpRewritePattern;
+
+  LogicalResult matchAndRewrite(vector::OuterProductOp outerProductOp,
+                                PatternRewriter &rewriter) const override {
+
+    // We don't yet support lowering AXPY operations to SME. These could be
+    // lowered by masking out all but the first element of the LHS.
+    if (!isa<VectorType>(outerProductOp.getOperandTypeRHS()))
+      return outerProductOp.emitError("AXPY operations not supported");
+
+    if (!arm_sme::isValidSMETileVectorType(
+            outerProductOp.getResultVectorType()))
+      return outerProductOp.emitError(
+          "outer product does not fit into SME tile");
+
+    auto kind = outerProductOp.getKind();
+    if (kind != vector::CombiningKind::ADD)
+      return outerProductOp.emitError(
+          "unsupported kind (lowering to SME only supports ADD at the moment)");
+
+    Value lhsMask = {};
+    Value rhsMask = {};
+    Operation *rootOp = outerProductOp;
+    auto loc = outerProductOp.getLoc();
+    if (outerProductOp.isMasked()) {
+      auto maskOp = outerProductOp.getMaskingOp();
+      rewriter.setInsertionPoint(maskOp);
+      rootOp = maskOp;
+      auto operandMasks = decomposeResultMask(loc, maskOp.getMask(), rewriter);
+      if (failed(operandMasks))
+        return failure();
+      std::tie(lhsMask, rhsMask) = *operandMasks;
+    }
+
+    rewriter.replaceOpWithNewOp<arm_sme::OuterProductOp>(
+        rootOp, outerProductOp.getResultVectorType(), outerProductOp.getLhs(),
+        outerProductOp.getRhs(), lhsMask, rhsMask, outerProductOp.getAcc());
+
+    return success();
+  }
+
+  static FailureOr<std::pair<Value, Value>>
+  decomposeResultMask(Location loc, Value mask, PatternRewriter &rewriter) {
+    // Attempt to extract masks from vector.create_mask.
+    // TODO: Add support for other mask sources.
+    auto createMaskOp = mask.getDefiningOp<vector::CreateMaskOp>();
+    if (!createMaskOp)
+      return failure();
+
+    auto maskType = createMaskOp.getVectorType();
+    Value lhsMaskDim = createMaskOp.getOperand(0);
+    Value rhsMaskDim = createMaskOp.getOperand(1);
+
+    VectorType operandMaskType = VectorType::Builder(maskType).dropDim(0);
+    Value lhsMask =
+        rewriter.create<vector::CreateMaskOp>(loc, operandMaskType, lhsMaskDim);
+    Value rhsMask =
+        rewriter.create<vector::CreateMaskOp>(loc, operandMaskType, rhsMaskDim);
+
+    return std::make_pair(lhsMask, rhsMask);
+  }
+};
+
 } // namespace
 
 void mlir::populateVectorToArmSMEPatterns(RewritePatternSet &patterns,
                                           MLIRContext &ctx) {
-  patterns.add<TransferReadPermutationToArmSMELowering,
-               TransferWriteToArmSMELowering, VectorLoadToArmSMELowering,
-               VectorStoreToArmSMELowering, ConstantOpToArmSMELowering,
-               BroadcastOpToArmSMELowering, SplatOpToArmSMELowering,
-               TransposeOpToArmSMELowering>(&ctx);
+  patterns.add<BroadcastOpToArmSMELowering, ConstantOpToArmSMELowering,
+               SplatOpToArmSMELowering, TransferReadPermutationToArmSMELowering,
+               TransferWriteToArmSMELowering, TransposeOpToArmSMELowering,
+               VectorLoadToArmSMELowering, VectorStoreToArmSMELowering,
+               VectorOuterProductToArmSMELowering>(&ctx);
 }

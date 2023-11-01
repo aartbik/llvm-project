@@ -15,9 +15,11 @@
 #include "clang/AST/ExprCXX.h"
 #include "clang/AST/ExprObjC.h"
 #include "clang/AST/ExprOpenMP.h"
+#include "clang/AST/IgnoreExpr.h"
 #include "clang/AST/TypeLoc.h"
 #include "clang/Basic/CharInfo.h"
 #include "clang/Basic/SourceManager.h"
+#include "clang/Basic/Specifiers.h"
 #include "clang/Basic/TargetInfo.h"
 #include "clang/Sema/Designator.h"
 #include "clang/Sema/EnterExpressionEvaluationContext.h"
@@ -169,22 +171,9 @@ static void updateStringLiteralType(Expr *E, QualType Ty) {
   while (true) {
     E->setType(Ty);
     E->setValueKind(VK_PRValue);
-    if (isa<StringLiteral>(E) || isa<ObjCEncodeExpr>(E)) {
+    if (isa<StringLiteral>(E) || isa<ObjCEncodeExpr>(E))
       break;
-    } else if (ParenExpr *PE = dyn_cast<ParenExpr>(E)) {
-      E = PE->getSubExpr();
-    } else if (UnaryOperator *UO = dyn_cast<UnaryOperator>(E)) {
-      assert(UO->getOpcode() == UO_Extension);
-      E = UO->getSubExpr();
-    } else if (GenericSelectionExpr *GSE = dyn_cast<GenericSelectionExpr>(E)) {
-      E = GSE->getResultExpr();
-    } else if (ChooseExpr *CE = dyn_cast<ChooseExpr>(E)) {
-      E = CE->getChosenSubExpr();
-    } else if (PredefinedExpr *PE = dyn_cast<PredefinedExpr>(E)) {
-      E = PE->getFunctionName();
-    } else {
-      llvm_unreachable("unexpected expr in string literal init");
-    }
+    E = IgnoreParensSingleStep(E);
   }
 }
 
@@ -193,20 +182,9 @@ static void updateStringLiteralType(Expr *E, QualType Ty) {
 static void updateGNUCompoundLiteralRValue(Expr *E) {
   while (true) {
     E->setValueKind(VK_PRValue);
-    if (isa<CompoundLiteralExpr>(E)) {
+    if (isa<CompoundLiteralExpr>(E))
       break;
-    } else if (ParenExpr *PE = dyn_cast<ParenExpr>(E)) {
-      E = PE->getSubExpr();
-    } else if (UnaryOperator *UO = dyn_cast<UnaryOperator>(E)) {
-      assert(UO->getOpcode() == UO_Extension);
-      E = UO->getSubExpr();
-    } else if (GenericSelectionExpr *GSE = dyn_cast<GenericSelectionExpr>(E)) {
-      E = GSE->getResultExpr();
-    } else if (ChooseExpr *CE = dyn_cast<ChooseExpr>(E)) {
-      E = CE->getChosenSubExpr();
-    } else {
-      llvm_unreachable("unexpected expr in array compound literal init");
-    }
+    E = IgnoreParensSingleStep(E);
   }
 }
 
@@ -222,9 +200,8 @@ static void CheckStringInit(Expr *Str, QualType &DeclT, const ArrayType *AT,
     // being initialized to a string literal.
     llvm::APInt ConstVal(32, StrLength);
     // Return a new array type (C99 6.7.8p22).
-    DeclT = S.Context.getConstantArrayType(IAT->getElementType(),
-                                           ConstVal, nullptr,
-                                           ArrayType::Normal, 0);
+    DeclT = S.Context.getConstantArrayType(
+        IAT->getElementType(), ConstVal, nullptr, ArraySizeModifier::Normal, 0);
     updateStringLiteralType(Str, DeclT);
     return;
   }
@@ -1831,8 +1808,8 @@ void InitListChecker::CheckVectorType(const InitializedEntity &Entity,
 
     bool isBigEndian = SemaRef.Context.getTargetInfo().isBigEndian();
     const VectorType *T = Entity.getType()->castAs<VectorType>();
-    if (isBigEndian && (T->getVectorKind() == VectorType::NeonVector ||
-                        T->getVectorKind() == VectorType::NeonPolyVector)) {
+    if (isBigEndian && (T->getVectorKind() == VectorKind::Neon ||
+                        T->getVectorKind() == VectorKind::NeonPoly)) {
       // The ability to use vector initializer lists is a GNU vector extension
       // and is unrelated to the NEON intrinsics in arm_neon.h. On little
       // endian machines it works fine, however on big endian machines it
@@ -2075,7 +2052,7 @@ void InitListChecker::CheckArrayType(const InitializedEntity &Entity,
     }
 
     DeclType = SemaRef.Context.getConstantArrayType(
-        elementType, maxElements, nullptr, ArrayType::Normal, 0);
+        elementType, maxElements, nullptr, ArraySizeModifier::Normal, 0);
   }
   if (!hadError) {
     // If there are any members of the array that get value-initialized, check
@@ -4079,7 +4056,7 @@ static bool TryInitializerListConstruction(Sema &S,
       E.withConst(),
       llvm::APInt(S.Context.getTypeSize(S.Context.getSizeType()),
                   List->getNumInits()),
-      nullptr, clang::ArrayType::Normal, 0);
+      nullptr, clang::ArraySizeModifier::Normal, 0);
   InitializedEntity HiddenArray =
       InitializedEntity::InitializeTemporary(ArrayType);
   InitializationKind Kind = InitializationKind::CreateDirectList(
@@ -4528,6 +4505,17 @@ static void TryReferenceListInitialization(Sema &S,
   if (Sequence) {
     if (DestType->isRValueReferenceType() ||
         (T1Quals.hasConst() && !T1Quals.hasVolatile())) {
+      if (S.getLangOpts().CPlusPlus20 &&
+          isa<IncompleteArrayType>(T1->getUnqualifiedDesugaredType()) &&
+          DestType->isRValueReferenceType()) {
+        // C++20 [dcl.init.list]p3.10:
+        // List-initialization of an object or reference of type T is defined as
+        // follows:
+        // ..., unless T is “reference to array of unknown bound of U”, in which
+        // case the type of the prvalue is the type of x in the declaration U
+        // x[] H, where H is the initializer list.
+        Sequence.AddQualificationConversionStep(cv1T1, clang::VK_PRValue);
+      }
       Sequence.AddReferenceBindingStep(cv1T1IgnoreAS,
                                        /*BindingTemporary=*/true);
       if (T1Quals.hasAddressSpace())
@@ -5524,7 +5512,7 @@ static void TryOrBuildParenListInitialization(
     if (ResultType.isNull()) {
       ResultType = S.Context.getConstantArrayType(
           AT->getElementType(), llvm::APInt(/*numBits=*/32, ArrayLength),
-          /*SizeExpr=*/nullptr, ArrayType::Normal, 0);
+          /*SizeExpr=*/nullptr, ArraySizeModifier::Normal, 0);
     }
   } else if (auto *RT = Entity.getType()->getAs<RecordType>()) {
     bool IsUnion = RT->isUnionType();
@@ -7409,8 +7397,9 @@ static bool shouldTrackImplicitObjectArg(const CXXMethodDecl *Callee) {
       return true;
   if (!isInStlNamespace(Callee->getParent()))
     return false;
-  if (!isRecordWithAttr<PointerAttr>(Callee->getThisObjectType()) &&
-      !isRecordWithAttr<OwnerAttr>(Callee->getThisObjectType()))
+  if (!isRecordWithAttr<PointerAttr>(
+          Callee->getFunctionObjectParameterType()) &&
+      !isRecordWithAttr<OwnerAttr>(Callee->getFunctionObjectParameterType()))
     return false;
   if (Callee->getReturnType()->isPointerType() ||
       isRecordWithAttr<PointerAttr>(Callee->getReturnType())) {
@@ -7545,7 +7534,7 @@ static bool implicitObjectParamIsLifetimeBound(const FunctionDecl *FD) {
       QualType LHST;
       auto *MD = dyn_cast<CXXMethodDecl>(FD);
       if (MD && MD->isCXXInstanceMember())
-        LHST = Ctx.getLValueReferenceType(MD->getThisObjectType());
+        LHST = Ctx.getLValueReferenceType(MD->getFunctionObjectParameterType());
       else
         LHST = MD->getParamDecl(0)->getType();
       if (Ctx.hasSameType(RetT, LHST))
@@ -9247,10 +9236,8 @@ ExprResult InitializationSequence::Perform(Sema &S,
           if (const ConstantArrayType *ConstantSource
                  = S.Context.getAsConstantArrayType(CurInit.get()->getType())) {
             *ResultType = S.Context.getConstantArrayType(
-                                             IncompleteDest->getElementType(),
-                                             ConstantSource->getSize(),
-                                             ConstantSource->getSizeExpr(),
-                                             ArrayType::Normal, 0);
+                IncompleteDest->getElementType(), ConstantSource->getSize(),
+                ConstantSource->getSizeExpr(), ArraySizeModifier::Normal, 0);
           }
         }
       }
@@ -9518,7 +9505,7 @@ static void diagnoseListInit(Sema &S, const InitializedEntity &Entity,
         E.withConst(),
         llvm::APInt(S.Context.getTypeSize(S.Context.getSizeType()),
                     InitList->getNumInits()),
-        nullptr, clang::ArrayType::Normal, 0);
+        nullptr, clang::ArraySizeModifier::Normal, 0);
     InitializedEntity HiddenArray =
         InitializedEntity::InitializeTemporary(ArrayType);
     return diagnoseListInit(S, HiddenArray, InitList);

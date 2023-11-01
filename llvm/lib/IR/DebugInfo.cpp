@@ -267,12 +267,6 @@ void DebugInfoFinder::processSubprogram(DISubprogram *SP) {
       processType(TVal->getType());
     }
   }
-
-  for (auto *N : SP->getRetainedNodes()) {
-    if (auto *Var = dyn_cast<DILocalVariable>(N)) {
-      processLocalVariable(Var);
-    }
-  }
 }
 
 void DebugInfoFinder::processVariable(const Module &M,
@@ -281,10 +275,7 @@ void DebugInfoFinder::processVariable(const Module &M,
   if (!N)
     return;
 
-  processLocalVariable(dyn_cast<DILocalVariable>(N));
-}
-
-void DebugInfoFinder::processLocalVariable(DILocalVariable *DV) {
+  auto *DV = dyn_cast<DILocalVariable>(N);
   if (!DV)
     return;
 
@@ -1956,7 +1947,7 @@ std::optional<AssignmentInfo> at::getAssignmentInfo(const DataLayout &DL,
     // We can't use a non-const size, bail.
     return std::nullopt;
   uint64_t SizeInBits = 8 * ConstLengthInBytes->getZExtValue();
-  return getAssignmentInfoImpl(DL, StoreDest, TypeSize::getFixed(SizeInBits));
+  return getAssignmentInfoImpl(DL, StoreDest, TypeSize::Fixed(SizeInBits));
 }
 
 std::optional<AssignmentInfo> at::getAssignmentInfo(const DataLayout &DL,

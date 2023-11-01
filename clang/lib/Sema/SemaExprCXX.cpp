@@ -72,8 +72,8 @@ ParsedType Sema::getInheritingConstructorName(CXXScopeSpec &SS,
     // Strip off the last layer of the nested-name-specifier and build a
     // typename type for it.
     assert(NNS->getAsIdentifier() == &Name && "not a constructor name");
-    Type = Context.getDependentNameType(ETK_None, NNS->getPrefix(),
-                                        NNS->getAsIdentifier());
+    Type = Context.getDependentNameType(
+        ElaboratedTypeKeyword::None, NNS->getPrefix(), NNS->getAsIdentifier());
     break;
 
   case NestedNameSpecifier::Global:
@@ -101,7 +101,8 @@ ParsedType Sema::getConstructorName(IdentifierInfo &II,
   // friend declaration or an inherited constructor declaration), form an
   // unresolved "typename" type.
   if (CurClass->isDependentContext() && !EnteringContext && SS.getScopeRep()) {
-    QualType T = Context.getDependentNameType(ETK_None, SS.getScopeRep(), &II);
+    QualType T = Context.getDependentNameType(ElaboratedTypeKeyword::None,
+                                              SS.getScopeRep(), &II);
     return ParsedType::make(T);
   }
 
@@ -245,8 +246,9 @@ ParsedType Sema::getDestructorName(IdentifierInfo &II, SourceLocation NameLoc,
       if (IsAcceptableResult(Type)) {
         QualType T = Context.getTypeDeclType(Type);
         MarkAnyDeclReferenced(Type->getLocation(), Type, /*OdrUse=*/false);
-        return CreateParsedType(Context.getElaboratedType(ETK_None, nullptr, T),
-                                Context.getTrivialTypeSourceInfo(T, NameLoc));
+        return CreateParsedType(
+            Context.getElaboratedType(ElaboratedTypeKeyword::None, nullptr, T),
+            Context.getTrivialTypeSourceInfo(T, NameLoc));
       }
     }
 
@@ -362,9 +364,9 @@ ParsedType Sema::getDestructorName(IdentifierInfo &II, SourceLocation NameLoc,
     // We didn't find our type, but that's OK: it's dependent anyway.
 
     // FIXME: What if we have no nested-name-specifier?
-    QualType T = CheckTypenameType(ETK_None, SourceLocation(),
-                                   SS.getWithLocInContext(Context),
-                                   II, NameLoc);
+    QualType T =
+        CheckTypenameType(ElaboratedTypeKeyword::None, SourceLocation(),
+                          SS.getWithLocInContext(Context), II, NameLoc);
     return ParsedType::make(T);
   }
 
@@ -1160,7 +1162,7 @@ static QualType adjustCVQualifiersForCXXThisWithinLambda(
     auto C = CurLSI->getCXXThisCapture();
 
     if (C.isCopyCapture()) {
-      if (!CurLSI->Mutable)
+      if (CurLSI->lambdaCaptureShouldBeConst())
         ClassType.addConst();
       return ASTCtx.getPointerType(ClassType);
     }
@@ -1216,11 +1218,11 @@ QualType Sema::getCurrentThisType() {
   QualType ThisTy = CXXThisTypeOverride;
 
   if (CXXMethodDecl *method = dyn_cast<CXXMethodDecl>(DC)) {
-    if (method && method->isInstance())
+    if (method && method->isImplicitObjectMemberFunction())
       ThisTy = method->getThisType().getNonReferenceType();
   }
 
-  if (ThisTy.isNull() && isLambdaCallOperator(CurContext) &&
+  if (ThisTy.isNull() && isLambdaCallWithImplicitObjectParameter(CurContext) &&
       inTemplateInstantiation() && isa<CXXRecordDecl>(DC)) {
 
     // This is a lambda call operator that is being instantiated as a default
@@ -1333,6 +1335,7 @@ bool Sema::CheckCXXThisCapture(SourceLocation Loc, const bool Explicit,
       if (LSI && isGenericLambdaCallOperatorSpecialization(LSI->CallOperator)) {
         // This context can't implicitly capture 'this'; fail out.
         if (BuildAndDiagnose) {
+          LSI->CallOperator->setInvalidDecl();
           Diag(Loc, diag::err_this_capture)
               << (Explicit && idx == MaxFunctionScopesIndex);
           if (!Explicit)
@@ -1354,10 +1357,11 @@ bool Sema::CheckCXXThisCapture(SourceLocation Loc, const bool Explicit,
         continue;
       }
       // This context can't implicitly capture 'this'; fail out.
-      if (BuildAndDiagnose)
+      if (BuildAndDiagnose) {
+        LSI->CallOperator->setInvalidDecl();
         Diag(Loc, diag::err_this_capture)
             << (Explicit && idx == MaxFunctionScopesIndex);
-
+      }
       if (!Explicit)
         buildLambdaThisCaptureFixit(*this, LSI);
       return true;
@@ -1398,10 +1402,22 @@ ExprResult Sema::ActOnCXXThis(SourceLocation Loc) {
   /// C++ 9.3.2: In the body of a non-static member function, the keyword this
   /// is a non-lvalue expression whose value is the address of the object for
   /// which the function is called.
-
   QualType ThisTy = getCurrentThisType();
-  if (ThisTy.isNull())
-    return Diag(Loc, diag::err_invalid_this_use);
+
+  if (ThisTy.isNull()) {
+    DeclContext *DC = getFunctionLevelDeclContext();
+
+    if (const auto *Method = dyn_cast<CXXMethodDecl>(DC);
+        Method && Method->isExplicitObjectMemberFunction()) {
+      return Diag(Loc, diag::err_invalid_this_use) << 1;
+    }
+
+    if (isLambdaCallWithExplicitObjectParameter(CurContext))
+      return Diag(Loc, diag::err_invalid_this_use) << 1;
+
+    return Diag(Loc, diag::err_invalid_this_use) << 0;
+  }
+
   return BuildCXXThisExpr(Loc, ThisTy, /*IsImplicit=*/false);
 }
 
@@ -2388,10 +2404,10 @@ ExprResult Sema::BuildCXXNew(SourceRange Range, bool UseGlobal,
           AllocType,
           llvm::APInt(Context.getTypeSize(Context.getSizeType()),
                       *KnownArraySize),
-          *ArraySize, ArrayType::Normal, 0);
+          *ArraySize, ArraySizeModifier::Normal, 0);
     else if (ArraySize)
-      InitType =
-          Context.getIncompleteArrayType(AllocType, ArrayType::Normal, 0);
+      InitType = Context.getIncompleteArrayType(AllocType,
+                                                ArraySizeModifier::Normal, 0);
     else
       InitType = AllocType;
 
@@ -3960,7 +3976,7 @@ void Sema::CheckVirtualDtorCall(CXXDestructorDecl *dtor, SourceLocation Loc,
   if (getSourceManager().isInSystemHeader(PointeeRD->getLocation()))
     return;
 
-  QualType ClassType = dtor->getThisObjectType();
+  QualType ClassType = dtor->getFunctionObjectParameterType();
   if (PointeeRD->isAbstract()) {
     // If the class is abstract, we warn by default, because we're
     // sure the code has undefined behavior.
@@ -4319,15 +4335,17 @@ Sema::PerformImplicitConversion(Expr *From, QualType ToType,
     if (DiagnoseUseOfDecl(Fn, From->getBeginLoc()))
       return ExprError();
 
-    From = FixOverloadedFunctionReference(From, Found, Fn);
+    ExprResult Res = FixOverloadedFunctionReference(From, Found, Fn);
+    if (Res.isInvalid())
+      return ExprError();
 
     // We might get back another placeholder expression if we resolved to a
     // builtin.
-    ExprResult Checked = CheckPlaceholderExpr(From);
-    if (Checked.isInvalid())
+    Res = CheckPlaceholderExpr(Res.get());
+    if (Res.isInvalid())
       return ExprError();
 
-    From = Checked.get();
+    From = Res.get();
     FromType = From->getType();
   }
 
@@ -6387,7 +6405,7 @@ QualType Sema::CheckVectorConditionalTypes(ExprResult &Cond, ExprResult &LHS,
           Context.getExtVectorType(ResultElementTy, CondVT->getNumElements());
     else
       ResultType = Context.getVectorType(
-          ResultElementTy, CondVT->getNumElements(), VectorType::GenericVector);
+          ResultElementTy, CondVT->getNumElements(), VectorKind::Generic);
 
     LHS = ImpCastExprToType(LHS.get(), ResultType, CK_VectorSplat);
     RHS = ImpCastExprToType(RHS.get(), ResultType, CK_VectorSplat);
@@ -6899,9 +6917,9 @@ QualType Sema::FindCompositePointerType(SourceLocation Loc,
       case Array:
         if (auto *CAT = cast_or_null<ConstantArrayType>(ClassOrBound))
           return Ctx.getConstantArrayType(T, CAT->getSize(), nullptr,
-                                          ArrayType::Normal, 0);
+                                          ArraySizeModifier::Normal, 0);
         else
-          return Ctx.getIncompleteArrayType(T, ArrayType::Normal, 0);
+          return Ctx.getIncompleteArrayType(T, ArraySizeModifier::Normal, 0);
       }
       llvm_unreachable("unknown step kind");
     }
@@ -8052,68 +8070,6 @@ ExprResult Sema::ActOnPseudoDestructorExpr(Scope *S, Expr *Base,
                                    Destructed);
 }
 
-ExprResult Sema::BuildCXXMemberCallExpr(Expr *E, NamedDecl *FoundDecl,
-                                        CXXConversionDecl *Method,
-                                        bool HadMultipleCandidates) {
-  // Convert the expression to match the conversion function's implicit object
-  // parameter.
-  ExprResult Exp = PerformObjectArgumentInitialization(E, /*Qualifier=*/nullptr,
-                                          FoundDecl, Method);
-  if (Exp.isInvalid())
-    return true;
-
-  if (Method->getParent()->isLambda() &&
-      Method->getConversionType()->isBlockPointerType()) {
-    // This is a lambda conversion to block pointer; check if the argument
-    // was a LambdaExpr.
-    Expr *SubE = E;
-    CastExpr *CE = dyn_cast<CastExpr>(SubE);
-    if (CE && CE->getCastKind() == CK_NoOp)
-      SubE = CE->getSubExpr();
-    SubE = SubE->IgnoreParens();
-    if (CXXBindTemporaryExpr *BE = dyn_cast<CXXBindTemporaryExpr>(SubE))
-      SubE = BE->getSubExpr();
-    if (isa<LambdaExpr>(SubE)) {
-      // For the conversion to block pointer on a lambda expression, we
-      // construct a special BlockLiteral instead; this doesn't really make
-      // a difference in ARC, but outside of ARC the resulting block literal
-      // follows the normal lifetime rules for block literals instead of being
-      // autoreleased.
-      PushExpressionEvaluationContext(
-          ExpressionEvaluationContext::PotentiallyEvaluated);
-      ExprResult BlockExp = BuildBlockForLambdaConversion(
-          Exp.get()->getExprLoc(), Exp.get()->getExprLoc(), Method, Exp.get());
-      PopExpressionEvaluationContext();
-
-      // FIXME: This note should be produced by a CodeSynthesisContext.
-      if (BlockExp.isInvalid())
-        Diag(Exp.get()->getExprLoc(), diag::note_lambda_to_block_conv);
-      return BlockExp;
-    }
-  }
-
-  MemberExpr *ME =
-      BuildMemberExpr(Exp.get(), /*IsArrow=*/false, SourceLocation(),
-                      NestedNameSpecifierLoc(), SourceLocation(), Method,
-                      DeclAccessPair::make(FoundDecl, FoundDecl->getAccess()),
-                      HadMultipleCandidates, DeclarationNameInfo(),
-                      Context.BoundMemberTy, VK_PRValue, OK_Ordinary);
-
-  QualType ResultType = Method->getReturnType();
-  ExprValueKind VK = Expr::getValueKindForType(ResultType);
-  ResultType = ResultType.getNonLValueExprType(Context);
-
-  CXXMemberCallExpr *CE = CXXMemberCallExpr::Create(
-      Context, ME, /*Args=*/{}, ResultType, VK, Exp.get()->getEndLoc(),
-      CurFPFeatureOverrides());
-
-  if (CheckFunctionCall(Method, CE,
-                        Method->getType()->castAs<FunctionProtoType>()))
-    return ExprError();
-
-  return CheckForImmediateInvocation(CE, CE->getMethodDecl());
-}
-
 ExprResult Sema::BuildCXXNoexceptExpr(SourceLocation KeyLoc, Expr *Operand,
                                       SourceLocation RParen) {
   // If the operand is an unresolved lookup expression, the expression is ill-
@@ -8989,9 +8945,10 @@ Sema::ActOnTypeRequirement(SourceLocation TypenameKWLoc, CXXScopeSpec &SS,
          "Exactly one of TypeName and TemplateId must be specified.");
   TypeSourceInfo *TSI = nullptr;
   if (TypeName) {
-    QualType T = CheckTypenameType(ETK_Typename, TypenameKWLoc,
-                                   SS.getWithLocInContext(Context), *TypeName,
-                                   NameLoc, &TSI, /*DeducedTSTContext=*/false);
+    QualType T =
+        CheckTypenameType(ElaboratedTypeKeyword::Typename, TypenameKWLoc,
+                          SS.getWithLocInContext(Context), *TypeName, NameLoc,
+                          &TSI, /*DeducedTSTContext=*/false);
     if (T.isNull())
       return nullptr;
   } else {

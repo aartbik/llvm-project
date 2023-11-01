@@ -72,6 +72,7 @@ unsigned CodeGenTypes::ClangCallConvToLLVMCallConv(CallingConv CC) {
   case CC_PreserveAll: return llvm::CallingConv::PreserveAll;
   case CC_Swift: return llvm::CallingConv::Swift;
   case CC_SwiftAsync: return llvm::CallingConv::SwiftTail;
+  case CC_M68kRTD: return llvm::CallingConv::M68k_RTD;
   }
 }
 
@@ -252,6 +253,9 @@ static CallingConv getCallingConventionForDecl(const ObjCMethodDecl *D,
   if (D->hasAttr<PreserveAllAttr>())
     return CC_PreserveAll;
 
+  if (D->hasAttr<M68kRTDAttr>())
+    return CC_M68kRTD;
+
   return CC_C;
 }
 
@@ -298,7 +302,7 @@ CodeGenTypes::arrangeCXXMethodDeclaration(const CXXMethodDecl *MD) {
   setCUDAKernelCallingConvention(FT, CGM, MD);
   auto prototype = FT.getAs<FunctionProtoType>();
 
-  if (MD->isInstance()) {
+  if (MD->isImplicitObjectMemberFunction()) {
     // The abstract case is perfectly fine.
     const CXXRecordDecl *ThisType = TheCXXABI.getThisArgumentTypeForMethod(MD);
     return arrangeCXXMethodType(ThisType, prototype.getTypePtr(), MD);
@@ -448,7 +452,7 @@ CodeGenTypes::arrangeCXXConstructorCall(const CallArgList &args,
 const CGFunctionInfo &
 CodeGenTypes::arrangeFunctionDeclaration(const FunctionDecl *FD) {
   if (const CXXMethodDecl *MD = dyn_cast<CXXMethodDecl>(FD))
-    if (MD->isInstance())
+    if (MD->isImplicitObjectMemberFunction())
       return arrangeCXXMethodDeclaration(MD);
 
   CanQualType FTy = FD->getType()->getCanonicalTypeUnqualified();
@@ -2715,7 +2719,8 @@ void CodeGenModule::ConstructAttributeList(StringRef Name,
 
       auto *Decl = ParamType->getAsRecordDecl();
       if (CodeGenOpts.PassByValueIsNoAlias && Decl &&
-          Decl->getArgPassingRestrictions() == RecordDecl::APK_CanPassInRegs)
+          Decl->getArgPassingRestrictions() ==
+              RecordArgPassingKind::CanPassInRegs)
         // When calling the function, the pointer passed in will be the only
         // reference to the underlying object. Mark it accordingly.
         Attrs.addAttribute(llvm::Attribute::NoAlias);
@@ -3058,7 +3063,7 @@ void CodeGenFunction::EmitFunctionProlog(const CGFunctionInfo &FI,
             // indicates dereferenceability, and if the size is constant we can
             // use the dereferenceable attribute (which requires the size in
             // bytes).
-            if (ArrTy->getSizeModifier() == ArrayType::Static) {
+            if (ArrTy->getSizeModifier() == ArraySizeModifier::Static) {
               QualType ETy = ArrTy->getElementType();
               llvm::Align Alignment =
                   CGM.getNaturalTypeAlignment(ETy).getAsAlign();
@@ -3082,7 +3087,7 @@ void CodeGenFunction::EmitFunctionProlog(const CGFunctionInfo &FI,
             // For C99 VLAs with the static keyword, we don't know the size so
             // we can't use the dereferenceable attribute, but in addrspace(0)
             // we know that it must be nonnull.
-            if (ArrTy->getSizeModifier() == VariableArrayType::Static) {
+            if (ArrTy->getSizeModifier() == ArraySizeModifier::Static) {
               QualType ETy = ArrTy->getElementType();
               llvm::Align Alignment =
                   CGM.getNaturalTypeAlignment(ETy).getAsAlign();
@@ -3443,9 +3448,9 @@ static llvm::Value *tryRemoveRetainOfSelf(CodeGenFunction &CGF,
   const VarDecl *self = method->getSelfDecl();
   if (!self->getType().isConstQualified()) return nullptr;
 
-  // Look for a retain call. Note: stripPointerCasts looks through returned arg
-  // functions, which would cause us to miss the retain.
-  llvm::CallInst *retainCall = dyn_cast<llvm::CallInst>(result);
+  // Look for a retain call.
+  llvm::CallInst *retainCall =
+    dyn_cast<llvm::CallInst>(result->stripPointerCasts());
   if (!retainCall || retainCall->getCalledOperand() !=
                          CGF.CGM.getObjCEntrypoints().objc_retain)
     return nullptr;
